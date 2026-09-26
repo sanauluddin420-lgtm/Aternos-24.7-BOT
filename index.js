@@ -1,267 +1,600 @@
-const express = require('express');
-const path = require('path');
-const http = require('http');
-const { Server } = require('socket.io');
 const mineflayer = require('mineflayer');
+const { Movements, pathfinder, goals } = require('mineflayer-pathfinder');
+const { GoalBlock } = goals;
+const config = require('./settings.json');
+const express = require('express');
+const http = require('http');
 
-const serverHost = process.env.SERVER_HOST || 'DOOMS_DAY_REBORN.aternos.me';
-const serverPort = parseInt(process.env.SERVER_PORT || '59173', 10);
-const botUsername = process.env.BOT_USERNAME || '247_Monitor';
-const minecraftVersion = process.env.MC_VERSION || false;
-const reconnectInterval = parseInt(process.env.RECONNECT_INTERVAL_MS || '40000', 10);
-const antiAfkInterval = parseInt(process.env.ANTI_AFK_INTERVAL_MS || '20000', 10);
-const httpPort = parseInt(process.env.PORT || '3000', 10);
-
+// ============================================================
+// EXPRESS SERVER - Keep Render/Aternos alive
+// ============================================================
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server);
+const PORT = process.env.PORT || 5000;
 
-app.use(express.static(path.join(__dirname, '')));
+// Bot state tracking
+let botState = {
+  connected: false,
+  lastActivity: Date.now(),
+  reconnectAttempts: 0,
+  startTime: Date.now(),
+  errors: []
+};
 
+// Health check endpoint for monitoring
+// Health check endpoint for monitoring
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'main.html'));
+  // "Blue Teal Shadow" Theme - Live Dashboard
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>${config.name} Status</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: #0f172a; 
+            color: #f8fafc; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            margin: 0; 
+            overflow: hidden;
+          }
+          .container {
+            background: #1e293b;
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 0 50px rgba(45, 212, 191, 0.2);
+            text-align: center;
+            width: 400px;
+            border: 1px solid #334155;
+            transition: box-shadow 0.3s ease;
+          }
+          h1 { margin-bottom: 30px; font-size: 24px; color: #ccfbf1; display: flex; align-items: center; justify-content: center; gap: 10px; }
+          .stat-card {
+            background: #0f172a;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 12px;
+            border-left: 5px solid #2dd4bf;
+            text-align: left;
+            box-shadow: 5px 5px 15px rgba(0, 0, 0, 0.3);
+            position: relative;
+            overflow: hidden;
+          }
+          .label { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; }
+          .value { font-size: 18px; font-weight: bold; color: #2dd4bf; text-shadow: 0 0 10px rgba(45, 212, 191, 0.5); margin-top: 5px; }
+          .status-dot { 
+            height: 12px; width: 12px; 
+            border-radius: 50%; 
+            display: inline-block; 
+            margin-right: 8px;
+            box-shadow: 0 0 10px currentColor;
+            transition: color 0.3s ease, box-shadow 0.3s ease;
+            background-color: currentColor; /* Use CSS for the dot color */
+          }
+          /* Override specific IDs to set background color for the dot */
+          #live-indicator { background-color: currentColor; }
+          
+          .pulse { animation: pulse 2s infinite; }
+          @keyframes pulse {
+            0% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.1); }
+            100% { opacity: 1; transform: scale(1); }
+          }
+          .btn-guide {
+            display: inline-block; margin-top: 20px; padding: 12px 24px; 
+            background: #2dd4bf; color: #0f172a; text-decoration: none; 
+            border-radius: 8px; font-weight: bold; 
+            box-shadow: 0 0 15px rgba(45, 212, 191, 0.4);
+            transition: transform 0.2s;
+          }
+          .btn-guide:hover { transform: translateY(-2px); }
+          .connection-bar {
+            height: 4px; background: #334155; width: 100%; margin-top: 20px; border-radius: 2px; overflow: hidden;
+          }
+          .connection-fill {
+            height: 100%; width: 100%; background: #2dd4bf;
+            animation: loading 2s infinite linear;
+            transform-origin: 0% 50%;
+          }
+          @keyframes loading {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container" id="main-container">
+          <h1>
+            <span id="live-indicator" class="status-dot pulse" style="color: #ef4444;"></span> 
+            ${config.name}
+          </h1>
+          
+          <div class="stat-card">
+            <div class="label">Status</div>
+            <div class="value" id="status-text">Connecting...</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="label">Uptime</div>
+            <div class="value" id="uptime-text">0h 0m 0s</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="label">Coordinates</div>
+            <div class="value" id="coords-text">Waiting...</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="label">Server</div>
+            <div class="value">${config.server.ip}</div>
+          </div>
+
+          <a href="/tutorial" class="btn-guide">View Setup Guide</a>
+          
+          <div class="connection-bar">
+            <div class="connection-fill" id="activity-bar"></div>
+          </div>
+          
+          <p style="color: #64748b; font-size: 12px; margin-top: 15px;">
+            Live connection to Bot Process
+          </p>
+        </div>
+
+        <script>
+          const formatUptime = (seconds) => {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            return \`\${h}h \${m}m \${s}s\`;
+          };
+
+          const updateStats = async () => {
+            try {
+              const res = await fetch('/health');
+              const data = await res.json();
+              
+              const statusText = document.getElementById('status-text');
+              const uptimeText = document.getElementById('uptime-text');
+              const coordsText = document.getElementById('coords-text');
+              const liveDot = document.getElementById('live-indicator');
+              const container = document.getElementById('main-container');
+
+              // Update Status
+              if (data.status === 'connected') {
+                statusText.innerHTML = '<span class="status-dot" style="color: #4ade80;"></span> Online & Running';
+                statusText.style.color = '#2dd4bf';
+                liveDot.style.color = '#4ade80'; // Green pulse
+                container.style.boxShadow = '0 0 50px rgba(45, 212, 191, 0.2)';
+              } else {
+                statusText.innerHTML = '<span class="status-dot" style="color: #f87171;"></span> Reconnecting...';
+                statusText.style.color = '#f87171';
+                liveDot.style.color = '#f87171'; // Red pulse
+                container.style.boxShadow = '0 0 50px rgba(248, 113, 113, 0.2)';
+              }
+
+              // Update Uptime
+              uptimeText.innerText = formatUptime(data.uptime);
+
+              // Update Coords
+              if (data.coords) {
+                coordsText.innerText = \`Coords: \${Math.floor(data.coords.x)}, \${Math.floor(data.coords.y)}, \${Math.floor(data.coords.z)}\`;
+              } else {
+                coordsText.innerText = 'Unknown Location';
+              }
+
+            } catch (e) {
+              document.getElementById('status-text').innerText = 'System Offline';
+              document.getElementById('live-indicator').style.color = '#64748b'; // Grey
+            }
+          };
+
+          // Poll every 1 second
+          setInterval(updateStats, 1000);
+          updateStats();
+        </script>
+      </body>
+    </html>
+  `);
+});
+
+app.get('/tutorial', (req, res) => {
+  res.send(`
+    <html>
+      <head>
+        <title>${config.name} - Setup Guide</title>
+        <style>
+          body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #cbd5e1; padding: 40px; max-width: 800px; margin: 0 auto; line-height: 1.6; }
+          h1, h2 { color: #2dd4bf; }
+          h1 { border-bottom: 2px solid #334155; padding-bottom: 10px; }
+          .card { background: #1e293b; padding: 25px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #334155; }
+          a { color: #38bdf8; text-decoration: none; }
+          code { background: #334155; padding: 2px 6px; border-radius: 4px; color: #e2e8f0; font-family: monospace; }
+          .btn-home { display: inline-block; margin-bottom: 20px; padding: 8px 16px; background: #334155; color: white; border-radius: 6px; text-decoration: none; }
+        </style>
+      </head>
+      <body>
+        <a href="/" class="btn-home">Back to Dashboard</a>
+        <h1>Setup Guide (Under 15 Minutes)</h1>
+        
+        <div class="card">
+          <h2>Step 1: Configure Aternos</h2>
+          <ol>
+            <li>Go to <strong>Aternos</strong>.</li>
+            <li>Install <strong>Paper/Bukkit</strong> software.</li>
+            <li>Enable <strong>Cracked</strong> mode (Green Switch).</li>
+            <li>Install Plugins: <code>ViaVersion</code>, <code>ViaBackwards</code>, <code>ViaRewind</code>.</li>
+          </ol>
+        </div>
+
+        <div class="card">
+          <h2>Step 2: GitHub Setup</h2>
+          <ol>
+            <li>Download this code as ZIP and extract.</li>
+            <li>Edit <code>settings.json</code> with your IP/Port.</li>
+            <li>Upload all files to a new <strong>GitHub Repository</strong>.</li>
+          </ol>
+        </div>
+
+        <div class="card">
+          <h2>Step 3: Render (Free 24/7 Hosting)</h2>
+          <ol>
+            <li>Go to <a href="https://render.com" target="_blank">Render.com</a> and create a Web Service.</li>
+            <li>Connect your GitHub.</li>
+            <li>Build Command: <code>npm install</code></li>
+            <li>Start Command: <code>npm start</code></li>
+            <li><strong>Magic:</strong> The bot automatically pings itself to stay awake!</li>
+          </ol>
+        </div>
+        
+        <p style="text-align: center; margin-top: 40px; color: #64748b;">AFK Bot Dashboard</p>
+      </body>
+    </html>
+  `);
 });
 
 app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    botRunning: bot !== null,
-    botUsername: bot && bot.player ? bot.username : null,
-    target: `${serverHost}:${serverPort}`,
+  res.json({
+    status: botState.connected ? 'connected' : 'disconnected',
+    uptime: Math.floor((Date.now() - botState.startTime) / 1000),
+    coords: (bot && bot.entity) ? bot.entity.position : null,
+    lastActivity: botState.lastActivity,
+    reconnectAttempts: botState.reconnectAttempts,
+    memoryUsage: process.memoryUsage().heapUsed / 1024 / 1024
   });
 });
 
+app.get('/ping', (req, res) => res.send('pong'));
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[Server] HTTP server started on port ${PORT}`);
+});
+
+function formatUptime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  return `${h}h ${m}m ${s}s`;
+}
+
+// ============================================================
+// SELF-PING - Prevent Render from sleeping
+// ============================================================
+const SELF_PING_INTERVAL = 10 * 60 * 1000; // 10 minutes
+
+const https = require('https');
+
+function startSelfPing() {
+  setInterval(() => {
+    const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+    const protocol = url.startsWith('https') ? https : http;
+
+    protocol.get(`${url}/ping`, (res) => {
+      // console.log(`[KeepAlive] Self-ping: ${res.statusCode}`); // Optional: reduce spam
+    }).on('error', (err) => {
+      console.log(`[KeepAlive] Self-ping failed: ${err.message}`);
+    });
+  }, SELF_PING_INTERVAL);
+  console.log('[KeepAlive] Self-ping system started (every 10 min)');
+}
+
+startSelfPing();
+
+// ============================================================
+// MEMORY MONITORING
+// ============================================================
+setInterval(() => {
+  const mem = process.memoryUsage();
+  const heapMB = (mem.heapUsed / 1024 / 1024).toFixed(2);
+  console.log(`[Memory] Heap: ${heapMB} MB`);
+}, 5 * 60 * 1000); // Every 5 minutes
+
+// ============================================================
+// BOT CREATION WITH RECONNECTION LOGIC
+// ============================================================
 let bot = null;
-let antiAfkTimer = null;
-let reconnectTimer = null;
-let manualStop = false;
+let activeIntervals = [];
+let reconnectTimeout = null;
+let isReconnecting = false;
 
-io.on('connection', (socket) => {
-  console.log('Web client connected.');
+function clearAllIntervals() {
+  console.log(`[Cleanup] Clearing ${activeIntervals.length} intervals`);
+  activeIntervals.forEach(id => clearInterval(id));
+  activeIntervals = [];
+}
 
-  if (bot && bot.player) {
-    socket.emit('bot_status', `Bot ${bot.username} is online.`);
-  } else if (bot) {
-    socket.emit('bot_status', 'Bot is connecting...');
-  } else {
-    socket.emit('bot_status', 'Bot is offline.');
-  }
+function addInterval(callback, delay) {
+  const id = setInterval(callback, delay);
+  activeIntervals.push(id);
+  return id;
+}
 
-  socket.on('control_bot', (command) => {
-    switch (command) {
-      case 'start':
-        manualStop = false;
-        if (!bot) {
-          createBot();
-        } else {
-          io.emit('bot_status', 'Bot is already running.');
-        }
-        break;
-      case 'stop':
-        manualStop = true;
-        stopBot('Stopped by user.');
-        break;
-      case 'reconnect':
-        manualStop = false;
-        reconnectBot();
-        break;
-      default:
-        console.log(`Unknown command: ${command}`);
-        break;
-    }
-  });
-});
+function getReconnectDelay() {
+  // Aggressive reconnection: fast, flat delay or very subtle backoff
+  const baseDelay = config.utils['auto-reconnect-delay'] || 2000;
+  const maxDelay = config.utils['max-reconnect-delay'] || 15000;
 
-server.listen(httpPort, () => {
-  console.log(`HTTP server listening on port ${httpPort}.`);
-  createBot();
-});
+  // Use a much gentler backoff or just a flat delay if user wants "lower"
+  // Current logic: attempts * 1000 + base, capped at max
+  const delay = Math.min(baseDelay + (botState.reconnectAttempts * 1000), maxDelay);
+
+  return delay;
+}
 
 function createBot() {
-  clearReconnectTimer();
+  if (isReconnecting) {
+    console.log('[Bot] Already reconnecting, skipping...');
+    return;
+  }
 
+  // Cleanup previous bot
   if (bot) {
-    console.log('Bot instance already exists; skipping create.');
-    return;
-  }
-
-  console.log(`Connecting bot "${botUsername}" to ${serverHost}:${serverPort} ...`);
-  io.emit('bot_status', `Connecting to ${serverHost}:${serverPort}...`);
-
-  let newBot;
-  try {
-    newBot = mineflayer.createBot({
-      host: serverHost,
-      port: serverPort,
-      username: botUsername,
-      version: minecraftVersion,
-      auth: 'offline',
-      hideErrors: false,
-    });
-  } catch (err) {
-    console.error('Failed to create bot:', err.message);
-    io.emit('bot_status', `Failed to create bot: ${err.message}`);
-    scheduleReconnect();
-    return;
-  }
-
-  bot = newBot;
-
-  bot.once('login', () => {
-    console.log(`Bot "${bot.username}" logged in to ${serverHost}.`);
-    io.emit('bot_status', `Bot ${bot.username} logged in.`);
-  });
-
-  bot.once('spawn', () => {
-    console.log(`Bot "${bot.username}" spawned in the world.`);
-    io.emit('bot_status', `Bot ${bot.username} spawned. Anti-AFK active.`);
-    startAntiAfk();
-  });
-
-  bot.on('health', () => {
-    if (bot && bot.health <= 0) {
-      console.log('Bot has died, will respawn automatically.');
-    }
-  });
-
-  bot.on('death', () => {
-    console.log('Bot died. Respawning.');
-    io.emit('bot_status', 'Bot died, respawning.');
-  });
-
-  bot.on('kicked', (reason) => {
-    let message = reason;
+    clearAllIntervals();
     try {
-      const parsed = typeof reason === 'string' ? JSON.parse(reason) : reason;
-      message = (parsed && (parsed.text || parsed.translate)) || JSON.stringify(parsed);
-    } catch (_) {
-      // Reason was not JSON; use as-is.
+      bot.removeAllListeners();
+      bot.end();
+    } catch (e) {
+      console.log('[Cleanup] Error ending previous bot:', e.message);
     }
-    console.log(`Bot kicked: ${message}`);
-    io.emit('bot_status', `Kicked: ${message}`);
-  });
+    bot = null;
+  }
 
-  bot.on('error', (err) => {
-    console.error('Bot error:', err && err.message ? err.message : err);
-    io.emit('bot_status', `Error: ${err && err.message ? err.message : err}`);
-  });
+  console.log(`[Bot] Creating bot instance...`);
+  console.log(`[Bot] Connecting to ${config.server.ip}:${config.server.port}`);
 
-  bot.on('end', (reason) => {
-    console.log(`Bot disconnected. Reason: ${reason || 'unknown'}.`);
-    cleanupBot();
-    if (manualStop) {
-      io.emit('bot_status', 'Bot stopped.');
-      return;
-    }
-    io.emit('bot_status', `Disconnected (${reason || 'unknown'}). Reconnecting in ${reconnectInterval / 1000}s.`);
-    scheduleReconnect();
-  });
+  try {
+    bot = mineflayer.createBot({
+      username: config['bot-account'].username,
+      password: config['bot-account'].password || undefined,
+      auth: config['bot-account'].type,
+      host: config.server.ip,
+      port: config.server.port,
+      version: config.server.version,
+      hideErrors: false,
+      checkTimeoutInterval: 120000 // 2 minutes - detects dead connections without false-positive disconnects
+    });
+
+    bot.loadPlugin(pathfinder);
+
+    // Connection timeout - if no spawn in 60s, reconnect
+    const connectionTimeout = setTimeout(() => {
+      if (!botState.connected) {
+        console.log('[Bot] Connection timeout - no spawn received');
+        scheduleReconnect();
+      }
+    }, 60000);
+
+    bot.once('spawn', () => {
+  clearTimeout(connectionTimeout);
+  botState.connected = true;
+  botState.lastActivity = Date.now();
+  botState.reconnectAttempts = 0;
+  isReconnecting = false;
+
+  console.log(`[Bot] [+] Successfully spawned on server!`);
+
+  // ðŸ” FORCE LOGIN SYSTEM (Perzaan Edition)
+
+      bot.on('messagestr', (msg) => {
+  const message = msg.toLowerCase();
+
+  // Login
+  if (message.includes('login')) {
+    bot.chat('/login Perzuu');
+    console.log('[Auth] Login detected');
+  }
+
+  // Register
+  if (message.includes('register')) {
+    bot.chat('/register Perzuu Perzuu');
+    console.log('[Auth] Register detected');
+  }
+
+  // Creative mode success
+  if (
+    message.includes('commands.gamemode.success.self') ||
+    message.includes('set own game mode to creative mode')
+  ) {
+    console.log('[INFO] Bot is now in Creative Mode.');
+
+    bot.chat('/gamerule sendCommandFeedback false');
+  }
+});
+
+      if (config.discord && config.discord.events.connect) {
+  sendDiscordWebhook(`[+] **Connected** to \`${config.server.ip}\``, 0x4ade80);
 }
 
-function startAntiAfk() {
-  stopAntiAfk();
+const mcData = require('minecraft-data')(config.server.version);
+const defaultMove = new Movements(bot, mcData);
 
-  antiAfkTimer = setInterval(() => {
-    if (!bot || !bot.entity) return;
+initializeModules(bot, mcData, defaultMove);
+setupLeaveRejoin(bot, createBot);
 
-    try {
-      const moves = ['forward', 'back', 'left', 'right'];
-      const move = moves[Math.floor(Math.random() * moves.length)];
+setTimeout(() => {
+  if (bot && botState.connected) {
+    bot.chat('/gamerule sendCommandFeedback false');
+  }
+}, 3000);
 
-      bot.setControlState(move, true);
-      setTimeout(() => {
-        if (bot) bot.setControlState(move, false);
-      }, 600);
+setTimeout(() => {
+  if (bot && botState.connected) {
+    bot.chat('/gamemode creative');
+    console.log('[INFO] Attempted to set creative mode (requires OP)');
+  }
+}, 3000);
 
-      if (Math.random() < 0.4) {
-        bot.setControlState('jump', true);
-        setTimeout(() => {
-          if (bot) bot.setControlState('jump', false);
-        }, 250);
+});
+
+    // Handle disconnection
+    bot.on('end', (reason) => {
+      const wasSpawned = botState.connected;
+      console.log(`[Bot] Disconnected: ${reason || 'Unknown reason'}`);
+      botState.connected = false;
+      clearAllIntervals();
+
+      if (config.discord && config.discord.events.disconnect && reason !== 'Periodic Rejoin') {
+        sendDiscordWebhook(`[-] **Disconnected**: ${reason || 'Unknown'}`, 0xf87171); // Red
       }
 
-      const yaw = (Math.random() - 0.5) * Math.PI * 2;
-      const pitch = (Math.random() - 0.5) * (Math.PI / 3);
-      bot.look(yaw, pitch, true).catch(() => {});
+      if (config.utils['auto-reconnect']) {
+        scheduleReconnect();
+      }
+    });
 
-      bot.swingArm('right');
-    } catch (err) {
-      console.error('Anti-AFK error:', err.message);
-    }
-  }, antiAfkInterval);
-}
+    bot.on("kicked", (reason) => {
+    console.log(
+        "[KICK]",
+        typeof reason === "string"
+            ? reason
+            : JSON.stringify(reason, null, 2)
+    );
+});
 
-function stopAntiAfk() {
-  if (antiAfkTimer) {
-    clearInterval(antiAfkTimer);
-    antiAfkTimer = null;
+    bot.on('error', (err) => {
+      console.log(`[Bot] Error: ${err.message}`);
+      botState.errors.push({ type: 'error', message: err.message, time: Date.now() });
+      // Don't immediately reconnect on error - let 'end' event handle it
+    });
+
+  } catch (err) {
+    console.log(`[Bot] Failed to create bot: ${err.message}`);
+    scheduleReconnect();
   }
-}
-
-function cleanupBot() {
-  stopAntiAfk();
-  if (bot) {
-    bot.removeAllListeners();
-  }
-  bot = null;
-}
-
-function stopBot(message) {
-  clearReconnectTimer();
-  if (bot) {
-    try {
-      bot.quit(message || 'Bye');
-    } catch (err) {
-      console.error('Error quitting bot:', err.message);
-    }
-    cleanupBot();
-    console.log(message || 'Bot stopped.');
-    io.emit('bot_status', message || 'Bot stopped.');
-  } else {
-    io.emit('bot_status', 'Bot is not running.');
-  }
-}
-
-function reconnectBot() {
-  console.log('Manual reconnect requested.');
-  io.emit('bot_status', 'Reconnecting bot...');
-  if (bot) {
-    try {
-      bot.quit('Reconnecting');
-    } catch (err) {
-      console.error('Error during manual reconnect:', err.message);
-    }
-    cleanupBot();
-  }
-  clearReconnectTimer();
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    createBot();
-  }, 1000);
 }
 
 function scheduleReconnect() {
-  clearReconnectTimer();
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    if (!bot && !manualStop) createBot();
-  }, reconnectInterval);
-}
-
-function clearReconnectTimer() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
   }
+
+  if (isReconnecting) {
+    return;
+  }
+
+  isReconnecting = true;
+  botState.reconnectAttempts++;
+
+  const delay = getReconnectDelay();
+  console.log(`[Bot] Reconnecting in ${delay / 1000}s (attempt #${botState.reconnectAttempts})`);
+
+  reconnectTimeout = setTimeout(() => {
+    isReconnecting = false;
+    createBot();
+  }, delay);
 }
 
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down.');
-  manualStop = true;
-  stopBot('Server shutting down.');
-  process.exit(0);
+// ============================================================
+// MODULE INITIALIZATION
+// ============================================================
+function initializeModules(bot, mcData, defaultMove) {
+  console.log('[Modules] Initializing all modules...');
+
+  // ---------- AUTO AUTH ----------
+  let authDone = false;
+
+bot.on('messagestr', (msg) => {
+  const message = msg.toLowerCase();
+
+  if (authDone) return;
+
+  if (message.includes('/register') || message.includes('register')) {
+    authDone = true;
+    bot.chat('/register Perzuu Perzuu');
+    console.log('[Auth] Register sent');
+    return;
+  }
+
+  if (message.includes('/login') || message.includes('login')) {
+    authDone = true;
+    bot.chat('/login Perzuu');
+    console.log('[Auth] Login sent');
+    return;
+  }
 });
 
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
-});
+  // ---------- MOVE TO POSITION ----------
+  if (config.position.enabled) {
+    bot.pathfinder.setMovements(defaultMove);
+    bot.pathfinder.setGoal(new GoalBlock(config.position.x, config.position.y, config.position.z));
+  }
+
+  // ---------- ANTI-AFK (Simple) ----------
+  if (config.utils['anti-afk'].enabled) {
+    addInterval(() => {
+      if (bot && botState.connected) {
+        bot.setControlState('jump', true);
+        setTimeout(() => {
+          if (bot) bot.setControlState('jump', false);
+        }, 100);
+        botState.lastActivity = Date.now();
+      }
+    }, 3000); // Jump every 30 seconds
+
+    if (config.utils['anti-afk'].sneak) {
+      bot.setControlState('sneak', true);
+    }
+  }
+
+  // ---------- MOVEMENT MODULES ----------
+  if (config.movement['circle-walk'].enabled) {
+    startCircleWalk(bot, defaultMove);
+  }
+  if (config.movement['random-jump'].enabled) {
+    startRandomJump(bot);
+  }
+  if (config.movement['look-around'].enabled) {
+    startLookAround(bot);
+  }
+
+  // ---------- CUSTOM MODULES ----------
+  if (config.modules.avoidMobs) avoidMobs(bot);
+  if (config.modules.combat) combatModule(bot, mcData);
+  if (config.modules.beds) bedModule(bot, mcData);
+  if (config.modules.chat) chatModule(bot);
+
+  // Periodic Rejoin
+  if (config.utils['periodic-rejoin'] && config.utils['periodic-rejoin'].enabled) {
+    periodicRejoin(bot);
+  }
+
+  console.log('[Modules] All modules initialized!');
+}
+
+// Periodic Rejoin Module
+const setupLeaveRejoin = require('./leaveRejoin');
+
+// Periodic Rejoin Module - Handled by leaveRejoin.js now
+function periodicRejoin(bot) {
+  // Deprecated in favor of leaveRejoin.js
+  console.log('[Rejoin] Using new leaveRejoin system.');
+}
+
+// ============================================================
+// MOVEMENT HELPERS
+// ============================================================
+function startCircleWalk(bot, defaultMove) {
+  
